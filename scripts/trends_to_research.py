@@ -76,6 +76,7 @@ def main():
     parser.add_argument("--deep", action="store_true", help="Use --deep flag for comprehensive research")
     parser.add_argument("--dry-run", action="store_true", help="Show what would run without executing")
     parser.add_argument("--store", action="store_true", help="Persist findings to SQLite")
+    parser.add_argument("--limit", type=int, default=None, help="Cap results per source (passed to last30days.py)")
     args = parser.parse_args()
 
     # Find all Google Trends Logseq pages
@@ -125,6 +126,8 @@ def main():
                 cmd += " --deep"
             if args.store:
                 cmd += " --store"
+            if args.limit:
+                cmd += f" --limit {args.limit}"
             print(f"  {cmd}")
         return
 
@@ -141,6 +144,8 @@ def main():
             cmd.append("--deep")
         if args.store:
             cmd.append("--store")
+        if args.limit:
+            cmd.extend(["--limit", str(args.limit)])
 
         result = subprocess.run(cmd, cwd=str(SCRIPT_DIR))
 
