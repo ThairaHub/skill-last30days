@@ -14,6 +14,7 @@ Options:
     --debug             Enable verbose debug logging
     --store             Persist findings to SQLite database
     --diagnose          Show source availability diagnostics and exit
+    --limit=N           Cap results per source to N items (useful for testing)
 """
 
 import argparse
@@ -38,9 +39,9 @@ _child_pids: set = set()
 _child_pids_lock = threading.Lock()
 
 TIMEOUT_PROFILES = {
-    "quick":   {"global": 90,  "future": 30, "reddit_future": 60,  "youtube_future": 60,  "http": 15, "enrich_per": 8,  "enrich_total": 30, "enrich_max_items": 10},
-    "default": {"global": 180, "future": 60, "reddit_future": 90,  "youtube_future": 90,  "http": 30, "enrich_per": 15, "enrich_total": 45, "enrich_max_items": 15},
-    "deep":    {"global": 300, "future": 90, "reddit_future": 120, "youtube_future": 120, "http": 30, "enrich_per": 15, "enrich_total": 60, "enrich_max_items": 25},
+    "quick":   {"global": 90,  "future": 30, "reddit_future": 60,  "youtube_future": 60,  "http": 15, "enrich_per": 8,  "enrich_total": 30,  "enrich_max_items": 10},
+    "default": {"global": 180, "future": 60, "reddit_future": 90,  "youtube_future": 90,  "http": 30, "enrich_per": 15, "enrich_total": 45,  "enrich_max_items": 15},
+    "deep":    {"global": 600, "future": 180, "reddit_future": 300, "youtube_future": 240, "http": 60, "enrich_per": 30, "enrich_total": 120, "enrich_max_items": 25},
 }
 
 
@@ -80,7 +81,7 @@ def _install_global_timeout(timeout_seconds: int):
             sys.stderr.write(f"\n[TIMEOUT] Global timeout ({timeout_seconds}s) exceeded. Cleaning up.\n")
             sys.stderr.flush()
             _cleanup_children()
-            sys.exit(1)
+            os._exit(1)
         signal.signal(signal.SIGALRM, _handler)
         signal.alarm(timeout_seconds)
     else:
@@ -103,6 +104,8 @@ from lib import (
     http,
     models,
     normalize,
+    ollama_reddit,
+    ollama_x,
     openai_reddit,
     reddit_enrich,
     render,
@@ -132,39 +135,81 @@ def _search_reddit(
     to_date: str,
     depth: str,
     mock: bool,
+    limit: int = None,
 ) -> tuple:
-    """Search Reddit via OpenAI (runs in thread).
+    """Search Reddit via OpenAI or Ollama (runs in thread).
 
     Returns:
-        Tuple of (reddit_items, raw_openai, error)
+        Tuple of (reddit_items, raw_response, error)
     """
-    raw_openai = None
+    raw_response = None
     reddit_error = None
 
+    # Check if Ollama is configured for Reddit
+    use_ollama = config.get("USE_OLLAMA_REDDIT") and str(config.get("USE_OLLAMA_REDDIT")).lower() in ('true', '1', 'yes', 'on')
+
     if mock:
-        raw_openai = load_fixture("openai_sample.json")
-    else:
+        raw_response = load_fixture("openai_sample.json")
+        reddit_items = openai_reddit.parse_reddit_response(raw_response or {})
+    elif use_ollama:
+        # For Ollama: Skip LLM entirely and use Reddit's API directly
+        # (Ollama can't access real-time web data, so no point asking it)
+        sys.stderr.write(f"[REDDIT] Using direct Reddit API (Ollama mode)\n")
+        sys.stderr.flush()
+
         try:
-            raw_openai = openai_reddit.search_reddit(
+            # Use Reddit's global search API - searches across ALL subreddits
+            reddit_items = ollama_reddit.search_reddit_global(
+                topic,
+                limit=min(25, limit) if limit else 25,
+                sort="new"
+            )
+            sys.stderr.write(f"[REDDIT] Found {len(reddit_items)} posts via global search\n")
+            sys.stderr.flush()
+
+            # If global search found nothing, try guessing a subreddit name as fallback
+            if len(reddit_items) == 0:
+                core = ollama_reddit._extract_core_subject(topic)
+                potential_sub = core.replace(' ', '').replace('.', '').lower()
+                sys.stderr.write(f"[REDDIT] Global search found nothing, trying r/{potential_sub}...\n")
+                sys.stderr.flush()
+
+                reddit_items = ollama_reddit.fetch_subreddit_posts(
+                    potential_sub,
+                    limit=min(25, limit) if limit else 25,
+                    sort="new"
+                )
+                if reddit_items:
+                    sys.stderr.write(f"[REDDIT] Found {len(reddit_items)} posts from r/{potential_sub}\n")
+                    sys.stderr.flush()
+        except Exception as e:
+            reddit_error = f"{type(e).__name__}: {e}"
+            sys.stderr.write(f"[REDDIT] Direct search failed: {e}\n")
+            sys.stderr.flush()
+            reddit_items = []
+    else:
+        # Use OpenAI for Reddit search (has web_search capability)
+        try:
+            raw_response = openai_reddit.search_reddit(
                 config["OPENAI_API_KEY"],
                 selected_models["openai"],
                 topic,
                 from_date,
                 to_date,
                 depth=depth,
+                max_items_cap=limit,
             )
         except http.HTTPError as e:
-            raw_openai = {"error": str(e)}
+            raw_response = {"error": str(e)}
             reddit_error = f"API error: {e}"
         except Exception as e:
-            raw_openai = {"error": str(e)}
+            raw_response = {"error": str(e)}
             reddit_error = f"{type(e).__name__}: {e}"
 
-    # Parse response
-    reddit_items = openai_reddit.parse_reddit_response(raw_openai or {})
+        reddit_items = openai_reddit.parse_reddit_response(raw_response or {})
 
-    # Quick retry with simpler query if few results
-    if len(reddit_items) < 5 and not mock and not reddit_error:
+    # Quick retry with simpler query if few results (only for OpenAI, skip for Ollama)
+    if len(reddit_items) < 5 and not mock and not reddit_error and not use_ollama:
         core = openai_reddit._extract_core_subject(topic)
         if core.lower() != topic.lower():
             try:
@@ -174,6 +219,7 @@ def _search_reddit(
                     core,
                     from_date, to_date,
                     depth=depth,
+                    max_items_cap=limit,
                 )
                 retry_items = openai_reddit.parse_reddit_response(retry_raw)
                 # Add items not already found (by URL)
@@ -184,8 +230,8 @@ def _search_reddit(
             except Exception:
                 pass
 
-    # Subreddit-targeted fallback if still < 3 results
-    if len(reddit_items) < 3 and not mock and not reddit_error:
+    # Subreddit-targeted fallback if still < 3 results (only for OpenAI, skip for Ollama)
+    if len(reddit_items) < 3 and not mock and not reddit_error and not use_ollama:
         sub_query = openai_reddit._build_subreddit_query(topic)
         try:
             sub_raw = openai_reddit.search_reddit(
@@ -194,6 +240,7 @@ def _search_reddit(
                 sub_query,
                 from_date, to_date,
                 depth=depth,
+                max_items_cap=limit,
             )
             sub_items = openai_reddit.parse_reddit_response(sub_raw)
             existing_urls = {item.get("url") for item in reddit_items}
@@ -203,7 +250,7 @@ def _search_reddit(
         except Exception:
             pass
 
-    return reddit_items, raw_openai, reddit_error
+    return reddit_items, raw_response, reddit_error
 
 
 def _search_x(
@@ -215,17 +262,23 @@ def _search_x(
     depth: str,
     mock: bool,
     x_source: str = "xai",
+    limit: int = None,
 ) -> tuple:
-    """Search X via Bird CLI or xAI (runs in thread).
+    """Search X via Bird CLI, xAI, or Ollama (runs in thread).
 
     Args:
-        x_source: 'bird' or 'xai' - which backend to use
+        x_source: 'bird', 'xai', or 'ollama' - which backend to use
 
     Returns:
         Tuple of (x_items, raw_response, error)
     """
     raw_response = None
     x_error = None
+
+    # Check if Ollama is configured for X (only as fallback — Bird uses real API data)
+    use_ollama = config.get("USE_OLLAMA_X") and str(config.get("USE_OLLAMA_X")).lower() in ('true', '1', 'yes', 'on')
+    if use_ollama and x_source != "bird":
+        x_source = "ollama"
 
     if mock:
         raw_response = load_fixture("xai_sample.json")
@@ -240,6 +293,7 @@ def _search_x(
                 from_date,
                 to_date,
                 depth=depth,
+                max_items_cap=limit,
             )
         except Exception as e:
             raw_response = {"error": str(e)}
@@ -253,7 +307,36 @@ def _search_x(
 
         return x_items, raw_response, x_error
 
-    # Use xAI (original behavior)
+    # Use Ollama if specified
+    if x_source == "ollama":
+        ollama_base_url = config.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        ollama_model = config.get("OLLAMA_X_MODEL")
+        if not ollama_model:
+            x_error = "OLLAMA_X_MODEL not configured"
+            raw_response = {"error": x_error}
+            return [], raw_response, x_error
+
+        try:
+            raw_response = ollama_x.search_x(
+                ollama_base_url,
+                ollama_model,
+                topic,
+                from_date,
+                to_date,
+                depth=depth,
+                max_items_cap=limit,
+            )
+        except http.HTTPError as e:
+            raw_response = {"error": str(e)}
+            x_error = f"API error: {e}"
+        except Exception as e:
+            raw_response = {"error": str(e)}
+            x_error = f"{type(e).__name__}: {e}"
+
+        x_items = ollama_x.parse_x_response(raw_response or {})
+        return x_items, raw_response, x_error
+
+    # Use xAI (default behavior)
     try:
         raw_response = xai_x.search_x(
             config["XAI_API_KEY"],
@@ -262,6 +345,7 @@ def _search_x(
             from_date,
             to_date,
             depth=depth,
+            max_items_cap=limit,
         )
     except http.HTTPError as e:
         raw_response = {"error": str(e)}
@@ -280,6 +364,7 @@ def _search_youtube(
     from_date: str,
     to_date: str,
     depth: str,
+    limit: int = None,
 ) -> tuple:
     """Search YouTube via yt-dlp (runs in thread).
 
@@ -290,7 +375,7 @@ def _search_youtube(
 
     try:
         response = youtube_yt.search_and_transcribe(
-            topic, from_date, to_date, depth=depth,
+            topic, from_date, to_date, depth=depth, max_items_cap=limit,
         )
     except Exception as e:
         return [], f"{type(e).__name__}: {e}"
@@ -430,10 +515,13 @@ def _run_supplemental(
     reddit_future = None
     x_future = None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
         if has_subs:
+            # Use ollama_reddit.search_subreddits - it works for everyone
+            # (doesn't need OpenAI, just hits Reddit's JSON API directly)
             reddit_future = executor.submit(
-                openai_reddit.search_subreddits,
+                ollama_reddit.search_subreddits,
                 entities["reddit_subreddits"],
                 topic,
                 from_date,
@@ -474,6 +562,8 @@ def _run_supplemental(
                 sys.stderr.write("[Phase 2] Supplemental X timed out (30s)\n")
             except Exception as e:
                 sys.stderr.write(f"[Phase 2] Supplemental X error: {e}\n")
+    finally:
+        executor.shutdown(wait=False)
 
     if supplemental_reddit or supplemental_x:
         sys.stderr.write(
@@ -497,6 +587,7 @@ def run_research(
     x_source: str = "xai",
     run_youtube: bool = False,
     timeouts: dict = None,
+    limit: int = None,
 ) -> tuple:
     """Run the research pipeline.
 
@@ -511,6 +602,8 @@ def run_research(
     """
     if timeouts is None:
         timeouts = TIMEOUT_PROFILES[depth]
+    if limit is not None:
+        timeouts = {**timeouts, "enrich_max_items": min(timeouts["enrich_max_items"], limit)}
     future_timeout = timeouts["future"]
 
     reddit_items = []
@@ -578,14 +671,15 @@ def run_research(
     web_future = None
     max_workers = 2 + (1 if run_youtube else 0) + (1 if web_backend else 0)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
         # Submit searches
         if do_reddit:
             if progress:
                 progress.start_reddit()
             reddit_future = executor.submit(
                 _search_reddit, topic, config, selected_models,
-                from_date, to_date, depth, mock
+                from_date, to_date, depth, mock, limit
             )
 
         if do_x:
@@ -593,14 +687,14 @@ def run_research(
                 progress.start_x()
             x_future = executor.submit(
                 _search_x, topic, config, selected_models,
-                from_date, to_date, depth, mock, x_source
+                from_date, to_date, depth, mock, x_source, limit
             )
 
         if run_youtube:
             if progress:
                 progress.start_youtube()
             youtube_future = executor.submit(
-                _search_youtube, topic, from_date, to_date, depth
+                _search_youtube, topic, from_date, to_date, depth, limit
             )
 
         if web_backend:
@@ -676,6 +770,8 @@ def run_research(
                     progress.show_error(f"Web error: {e}")
             sys.stderr.write(f"[web] {len(web_items)} results\n")
             sys.stderr.flush()
+    finally:
+        executor.shutdown(wait=False)
 
     # Enrich Reddit items with real data (parallel, capped)
     enrich_max = timeouts["enrich_max_items"]
@@ -704,7 +800,8 @@ def run_research(
             # Uses short HTTP timeout (10s) and 1 retry to fail fast on 429
             completed_count = 0
             rate_limited = False
-            with ThreadPoolExecutor(max_workers=5) as enrich_pool:
+            enrich_pool = ThreadPoolExecutor(max_workers=5)
+            try:
                 futures = {
                     enrich_pool.submit(reddit_enrich.enrich_reddit_item, item): i
                     for i, item in enumerate(items_to_enrich)
@@ -743,6 +840,8 @@ def run_research(
                     for idx in futures.values():
                         if reddit_items[idx] not in raw_reddit_enriched:
                             raw_reddit_enriched.append(reddit_items[idx])
+            finally:
+                enrich_pool.shutdown(wait=False)
 
         if progress:
             progress.end_reddit_enrich()
@@ -829,7 +928,14 @@ def main():
         type=int,
         default=None,
         metavar="SECS",
-        help="Global timeout in seconds (default: 180, quick: 90, deep: 300)",
+        help="Global timeout in seconds (default: 180, quick: 90, deep: 600)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap results per source to N items (useful for testing)",
     )
 
     args = parser.parse_args()
@@ -995,6 +1101,7 @@ def main():
         x_source=x_source or "xai",
         run_youtube=has_ytdlp,
         timeouts=timeouts,
+        limit=args.limit,
     )
 
     # Processing phase
@@ -1003,6 +1110,13 @@ def main():
     # Normalize items
     normalized_reddit = normalize.normalize_reddit_items(reddit_items, from_date, to_date)
     normalized_x = normalize.normalize_x_items(x_items, from_date, to_date)
+
+    # Hallucination guard: detect LLM-fabricated X posts (sequential IDs, template URLs, etc.)
+    if normalized_x and normalize.detect_x_hallucination(normalized_x):
+        print("[X WARNING] Hallucinated X results detected and discarded", file=sys.stderr)
+        x_error = "Hallucinated results detected and discarded"
+        normalized_x = []
+
     normalized_youtube = normalize.normalize_youtube_items(youtube_items, from_date, to_date) if youtube_items else []
     normalized_web = websearch.normalize_websearch_items(web_items, from_date, to_date) if web_items else []
 
@@ -1066,6 +1180,8 @@ def main():
 
     # Write outputs
     render.write_outputs(report, raw_openai, raw_xai, raw_reddit_enriched)
+    sys.stderr.write(f"[output] Saved to {render.OUTPUT_DIR}/report.md\n")
+    sys.stderr.flush()
 
     # Show completion
     if sources == "web":

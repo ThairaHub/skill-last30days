@@ -90,6 +90,7 @@ def search_youtube(
     from_date: str,
     to_date: str,
     depth: str = "default",
+    max_items_cap: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Search YouTube via yt-dlp. No API key needed.
 
@@ -106,6 +107,8 @@ def search_youtube(
         return {"items": [], "error": "yt-dlp not installed"}
 
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
+    if max_items_cap is not None:
+        count = min(count, max_items_cap)
     core_topic = _extract_core_subject(topic)
 
     _log(f"Searching YouTube for '{core_topic}' (since {from_date}, count={count})")
@@ -333,6 +336,7 @@ def search_and_transcribe(
     from_date: str,
     to_date: str,
     depth: str = "default",
+    max_items_cap: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Full YouTube search: find videos, then fetch transcripts for top results.
 
@@ -346,7 +350,7 @@ def search_and_transcribe(
         Dict with 'items' list. Each item has a 'transcript_snippet' field.
     """
     # Step 1: Search
-    search_result = search_youtube(topic, from_date, to_date, depth)
+    search_result = search_youtube(topic, from_date, to_date, depth, max_items_cap=max_items_cap)
     items = search_result.get("items", [])
 
     if not items:
@@ -354,6 +358,8 @@ def search_and_transcribe(
 
     # Step 2: Fetch transcripts for top N by views
     transcript_limit = TRANSCRIPT_LIMITS.get(depth, TRANSCRIPT_LIMITS["default"])
+    if max_items_cap is not None:
+        transcript_limit = min(transcript_limit, max_items_cap)
     top_ids = [item["video_id"] for item in items[:transcript_limit]]
     transcripts = fetch_transcripts_parallel(top_ids)
 

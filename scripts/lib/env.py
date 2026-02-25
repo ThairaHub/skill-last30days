@@ -5,6 +5,15 @@ import os
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+
+def _parse_bool(value: Any) -> bool:
+    """Parse boolean value from string or other types."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ('true', '1', 'yes', 'on')
+    return False
+
 # Allow override via environment variable for testing
 # Set LAST30DAYS_CONFIG_DIR="" for clean/no-config mode
 # Set LAST30DAYS_CONFIG_DIR="/path/to/dir" for custom config location
@@ -60,11 +69,21 @@ def get_config() -> Dict[str, Any]:
         ('OPENAI_MODEL_PIN', None),
         ('XAI_MODEL_POLICY', 'latest'),
         ('XAI_MODEL_PIN', None),
+        ('OLLAMA_BASE_URL', 'http://localhost:11434'),
+        ('OLLAMA_REDDIT_MODEL', 'gemma3:4b'),
+        ('OLLAMA_X_MODEL', 'gemma3:4b'),
+        ('USE_OLLAMA_REDDIT', True),
+        ('USE_OLLAMA_X', True),
+        ('BIRD_COOKIE_SOURCE', None),  # Browser to use for X cookies (safari, chrome, firefox)
     ]
 
     config = {}
     for key, default in keys:
-        config[key] = os.environ.get(key) or file_env.get(key, default)
+        value = os.environ.get(key) or file_env.get(key, default)
+        config[key] = value
+        # Set BIRD_COOKIE_SOURCE in os.environ so subprocess calls pick it up
+        if key == 'BIRD_COOKIE_SOURCE' and value:
+            os.environ['BIRD_COOKIE_SOURCE'] = value
 
     return config
 
@@ -82,6 +101,16 @@ def get_available_sources(config: Dict[str, Any]) -> str:
     has_openai = bool(config.get('OPENAI_API_KEY'))
     has_xai = bool(config.get('XAI_API_KEY'))
     has_web = has_web_search_keys(config)
+
+    # Check if Ollama is configured
+    use_ollama_reddit = _parse_bool(config.get('USE_OLLAMA_REDDIT'))
+    use_ollama_x = _parse_bool(config.get('USE_OLLAMA_X'))
+
+    # Ollama can provide Reddit/X if configured
+    if use_ollama_reddit:
+        has_openai = True
+    if use_ollama_x:
+        has_xai = True
 
     if has_openai and has_xai:
         return 'all' if has_web else 'both'
@@ -117,13 +146,22 @@ def get_web_search_source(config: Dict[str, Any]) -> Optional[str]:
 
 
 def get_missing_keys(config: Dict[str, Any]) -> str:
-    """Determine which sources are missing (accounting for Bird).
+    """Determine which sources are missing (accounting for Bird and Ollama).
 
     Returns: 'all', 'both', 'reddit', 'x', 'web', or 'none'
     """
     has_openai = bool(config.get('OPENAI_API_KEY'))
     has_xai = bool(config.get('XAI_API_KEY'))
     has_web = has_web_search_keys(config)
+
+    # Check if Ollama provides sources
+    use_ollama_reddit = _parse_bool(config.get('USE_OLLAMA_REDDIT'))
+    use_ollama_x = _parse_bool(config.get('USE_OLLAMA_X'))
+
+    if use_ollama_reddit:
+        has_openai = True
+    if use_ollama_x:
+        has_xai = True
 
     # Check if Bird provides X access (import here to avoid circular dependency)
     from . import bird_x

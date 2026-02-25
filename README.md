@@ -859,6 +859,65 @@ This example shows /last30days discovering **emerging developer workflows** - re
 
 At least one API key is required. X search works automatically if you're logged into x.com in your browser. YouTube search activates automatically when yt-dlp is in your PATH.
 
+## Ollama Support (Self-Hosted Alternative)
+
+**New in v2.2:** You can now use Ollama as a self-hosted, privacy-focused alternative to OpenAI and xAI APIs. Ollama generates search results locally, and Claude (the assistant) supervises the output.
+
+### Why use Ollama?
+
+- **Zero API costs** - Completely free after the initial setup
+- **Full privacy** - Your research queries never leave your machine
+- **No rate limits** - Research as much as you want
+- **Works offline** - Once models are downloaded, no internet required (except for fetching actual Reddit/X content)
+
+### Quick Setup
+
+1. **Install Ollama**:
+   ```bash
+   # macOS
+   brew install ollama
+
+   # Linux
+   curl -fsSL https://ollama.ai/install.sh | sh
+   ```
+
+2. **Start Ollama and pull a model**:
+   ```bash
+   ollama serve  # In one terminal
+   ollama pull llama3.1:70b  # In another (or use qwen2.5:32b, llama3.1:8b)
+   ```
+
+3. **Configure** `~/.config/last30days/.env`:
+   ```bash
+   # Use Ollama for Reddit search (instead of OpenAI)
+   USE_OLLAMA_REDDIT=true
+   OLLAMA_REDDIT_MODEL=llama3.1:70b
+
+   # Use Ollama for X search (instead of xAI)
+   USE_OLLAMA_X=true
+   OLLAMA_X_MODEL=llama3.1:70b
+
+   # Ollama base URL (default: http://localhost:11434)
+   OLLAMA_BASE_URL=http://localhost:11434
+   ```
+
+4. **Use it normally**:
+   ```bash
+   /last30days prompting techniques for ChatGPT
+   ```
+
+### Recommended Models
+
+| Model | Size | Speed | Quality | Best For |
+|-------|------|-------|---------|----------|
+| `llama3.1:70b` | ~40GB | Slow | Excellent | Deep research, best quality |
+| `qwen2.5:32b` | ~19GB | Medium | Very Good | Balanced performance |
+| `llama3.1:8b` | ~4.7GB | Fast | Good | Quick searches, testing |
+
+**Performance note:** Ollama models don't have real-time web access like OpenAI/xAI APIs, so results are based on model knowledge. Claude's supervision helps ensure quality.
+
+📖 **Full setup guide:** See [OLLAMA_SETUP.md](OLLAMA_SETUP.md) for detailed configuration, troubleshooting, and hybrid setups (e.g., OpenAI for Reddit + Ollama for X).
+
 ## How It Works
 
 ### Two-Phase Search Architecture

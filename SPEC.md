@@ -29,24 +29,30 @@ The orchestrator (`last30days.py`) coordinates discovery, enrichment, normalizat
 Other skills can import the research context in several ways:
 
 ### Inline Context Injection
+
 ```markdown
 ## Recent Research Context
+
 !python3 ~/.claude/skills/last30days/scripts/last30days.py "your topic" --emit=context
 ```
 
 ### Read from File
+
 ```markdown
 ## Research Context
+
 !cat ~/.local/share/last30days/out/last30days.context.md
 ```
 
 ### Get Path for Dynamic Loading
+
 ```bash
 CONTEXT_PATH=$(python3 ~/.claude/skills/last30days/scripts/last30days.py "topic" --emit=path)
 cat "$CONTEXT_PATH"
 ```
 
 ### JSON for Programmatic Use
+
 ```bash
 python3 ~/.claude/skills/last30days/scripts/last30days.py "topic" --emit=json > research.json
 ```
@@ -61,6 +67,7 @@ Options:
   --mock              Use fixtures instead of real API calls
   --emit=MODE         Output mode: compact|json|md|context|path (default: compact)
   --sources=MODE      Source selection: auto|reddit|x|both (default: auto)
+  --limit=N           Cap results per source to N items (useful for testing)
 ```
 
 ## Output Files
@@ -73,3 +80,17 @@ All outputs are written to `~/.local/share/last30days/out/`:
 - `raw_openai.json` - Raw OpenAI API response
 - `raw_xai.json` - Raw xAI API response
 - `raw_reddit_threads_enriched.json` - Enriched Reddit thread data
+
+### Logseq Integration
+
+When `/Volumes/server-ssd/Documents/Logseq/pages/` exists, a Logseq-native page is generated using outliner format (nested bullets, `key:: value` properties, `[[page refs]]`, `#tags`). Files written:
+
+- `last30days___<topic>.md` - Logseq page (appears as `last30days/<topic>` namespace)
+- `last30days___<topic>.json` - Full report data alongside the page
+
+The page includes queryable properties on every block (`score::`, `date::`, `url::`, `subreddit::`, `likes::`, etc.) and tags (`#last30days`, `#reddit`, `#x-post`, `#youtube`, `#web`).
+
+Example Logseq queries:
+- `{{query #last30days}}` - all research reports
+- `{{query (and #reddit [[r/ClaudeAI]])}}` - Reddit threads from a subreddit
+- `{{query (and #youtube (property score 80))}}` - high-scoring YouTube videos

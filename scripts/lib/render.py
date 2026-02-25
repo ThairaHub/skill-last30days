@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -444,6 +446,139 @@ def render_full_report(report: schema.Report) -> str:
     return "\n".join(lines)
 
 
+def _sanitize_logseq_filename(topic: str) -> str:
+    """Sanitize topic for use in a Logseq page filename."""
+    sanitized = re.sub(r'[/:*?"<>|\\]', '-', topic)
+    sanitized = re.sub(r'-{2,}', '-', sanitized).strip('- ')
+    return sanitized or 'untitled'
+
+
+def render_logseq(report: schema.Report) -> str:
+    """Render report as a Logseq-native outliner page.
+
+    Uses nested bullets, key:: value properties, [[page refs]], and #tags
+    so the data is browsable, linkable, and queryable inside Logseq.
+    """
+    lines = []
+
+    # Page properties (no bullet prefix — Logseq reads these as page-level metadata)
+    gen_date = report.generated_at[:10]
+    sources_used = []
+    if report.reddit:
+        sources_used.append("reddit")
+    if report.x:
+        sources_used.append("x")
+    if report.youtube:
+        sources_used.append("youtube")
+    if report.web:
+        sources_used.append("web")
+
+    lines.append(f"type:: [[research-report]]")
+    lines.append(f"topic:: [[{report.topic}]]")
+    lines.append(f"date:: [[{gen_date}]]")
+    lines.append(f"date-range:: {report.range_from} to {report.range_to}")
+    lines.append(f"mode:: {report.mode}")
+    if sources_used:
+        lines.append(f"sources:: {', '.join(sources_used)}")
+    lines.append("")
+
+    # Root block
+    lines.append(f"- Research: {report.topic} #last30days")
+
+    # Reddit section
+    if report.reddit_error:
+        lines.append(f"\t- Reddit Threads")
+        lines.append(f"\t\t- Error: {report.reddit_error}")
+    elif report.reddit:
+        lines.append(f"\t- Reddit Threads")
+        for item in report.reddit:
+            lines.append(f"\t\t- {item.title} #reddit")
+            lines.append(f"\t\t\t- subreddit:: [[r/{item.subreddit}]]")
+            lines.append(f"\t\t\t- url:: {item.url}")
+            if item.date:
+                lines.append(f"\t\t\t- date:: {item.date}")
+            lines.append(f"\t\t\t- score:: {item.score}")
+            if item.engagement:
+                eng = item.engagement
+                if eng.score is not None:
+                    lines.append(f"\t\t\t- upvotes:: {eng.score}")
+                if eng.num_comments is not None:
+                    lines.append(f"\t\t\t- comments:: {eng.num_comments}")
+            lines.append(f"\t\t\t- Relevance: {item.why_relevant}")
+            if item.comment_insights:
+                lines.append(f"\t\t\t- Insights")
+                for insight in item.comment_insights[:3]:
+                    lines.append(f"\t\t\t\t- {insight}")
+
+    # X section
+    if report.x_error:
+        lines.append(f"\t- X Posts")
+        lines.append(f"\t\t- Error: {report.x_error}")
+    elif report.x:
+        lines.append(f"\t- X Posts")
+        for item in report.x:
+            text_excerpt = item.text[:120].replace('\n', ' ')
+            lines.append(f"\t\t- @{item.author_handle}: {text_excerpt} #x-post")
+            lines.append(f"\t\t\t- url:: {item.url}")
+            if item.date:
+                lines.append(f"\t\t\t- date:: {item.date}")
+            lines.append(f"\t\t\t- score:: {item.score}")
+            if item.engagement:
+                eng = item.engagement
+                if eng.likes is not None:
+                    lines.append(f"\t\t\t- likes:: {eng.likes}")
+                if eng.reposts is not None:
+                    lines.append(f"\t\t\t- reposts:: {eng.reposts}")
+            lines.append(f"\t\t\t- Relevance: {item.why_relevant}")
+
+    # YouTube section
+    if report.youtube_error:
+        lines.append(f"\t- YouTube Videos")
+        lines.append(f"\t\t- Error: {report.youtube_error}")
+    elif report.youtube:
+        lines.append(f"\t- YouTube Videos")
+        for item in report.youtube:
+            lines.append(f"\t\t- {item.title} #youtube")
+            lines.append(f"\t\t\t- channel:: {item.channel_name}")
+            lines.append(f"\t\t\t- url:: {item.url}")
+            if item.date:
+                lines.append(f"\t\t\t- date:: {item.date}")
+            lines.append(f"\t\t\t- score:: {item.score}")
+            if item.engagement:
+                eng = item.engagement
+                if eng.views is not None:
+                    lines.append(f"\t\t\t- views:: {eng.views}")
+                if eng.likes is not None:
+                    lines.append(f"\t\t\t- likes:: {eng.likes}")
+            lines.append(f"\t\t\t- Relevance: {item.why_relevant}")
+            if item.transcript_snippet:
+                snippet = item.transcript_snippet[:200]
+                if len(item.transcript_snippet) > 200:
+                    snippet += "..."
+                lines.append(f"\t\t\t- Transcript: {snippet}")
+
+    # Web section
+    if report.web_error:
+        lines.append(f"\t- Web Results")
+        lines.append(f"\t\t- Error: {report.web_error}")
+    elif report.web:
+        lines.append(f"\t- Web Results")
+        for item in report.web:
+            lines.append(f"\t\t- {item.title} #web")
+            lines.append(f"\t\t\t- domain:: {item.source_domain}")
+            lines.append(f"\t\t\t- url:: {item.url}")
+            if item.date:
+                lines.append(f"\t\t\t- date:: {item.date}")
+            lines.append(f"\t\t\t- score:: {item.score}")
+            lines.append(f"\t\t\t- Relevance: {item.why_relevant}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+LOGSEQ_DIR = Path("/Volumes/server-ssd/Documents/Logseq/pages")
+
+
 def write_outputs(
     report: schema.Report,
     raw_openai: Optional[dict] = None,
@@ -484,6 +619,15 @@ def write_outputs(
     if raw_reddit_enriched:
         with open(OUTPUT_DIR / "raw_reddit_threads_enriched.json", 'w') as f:
             json.dump(raw_reddit_enriched, f, indent=2)
+
+    # Write Logseq-native page (outliner format with properties and tags)
+    if LOGSEQ_DIR.is_dir():
+        safe_topic = _sanitize_logseq_filename(report.topic)
+        logseq_page = LOGSEQ_DIR / f"last30days___{safe_topic}.md"
+        with open(logseq_page, 'w') as f:
+            f.write(render_logseq(report))
+        # Also copy report.json for programmatic access alongside the page
+        shutil.copy2(OUTPUT_DIR / "report.json", LOGSEQ_DIR / f"last30days___{safe_topic}.json")
 
 
 def get_context_path() -> str:

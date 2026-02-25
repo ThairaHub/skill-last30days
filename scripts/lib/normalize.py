@@ -1,5 +1,7 @@
 """Normalization of raw API data to canonical schema."""
 
+import re
+import sys
 from typing import Any, Dict, List, TypeVar, Union
 
 from . import dates, schema
@@ -45,6 +47,86 @@ def filter_by_date_range(
         result.append(item)
 
     return result
+
+
+def detect_x_hallucination(items: List[schema.XItem]) -> bool:
+    """Detect if a batch of X items was hallucinated by an LLM.
+
+    Checks for signals that indicate fabricated posts:
+    - Sequential status IDs (differ by exactly 1)
+    - Template IDs (all sharing a long common prefix)
+    - All engagement numbers suspiciously round (divisible by 10)
+
+    Args:
+        items: Normalized X items to check
+
+    Returns:
+        True if hallucination detected (entire batch is suspect).
+    """
+    if len(items) < 3:
+        return False
+
+    # Extract status IDs from URLs
+    status_ids = []
+    for item in items:
+        m = re.search(r'/status/(\d+)', item.url)
+        if m:
+            status_ids.append(int(m.group(1)))
+
+    if len(status_ids) < 3:
+        return False
+
+    # Signal 1: Sequential IDs (3+ IDs differing by exactly 1)
+    sorted_ids = sorted(status_ids)
+    consecutive = 1
+    for i in range(1, len(sorted_ids)):
+        if sorted_ids[i] - sorted_ids[i - 1] == 1:
+            consecutive += 1
+            if consecutive >= 3:
+                sys.stderr.write(
+                    f"[X HALLUCINATION] Sequential status IDs detected: "
+                    f"{sorted_ids[i-2]}..{sorted_ids[i]}\n"
+                )
+                return True
+        else:
+            consecutive = 1
+
+    # Signal 2: Template IDs (all share 15+ digit common prefix)
+    id_strs = [str(sid) for sid in status_ids]
+    prefix_len = 0
+    for chars in zip(*id_strs):
+        if len(set(chars)) == 1:
+            prefix_len += 1
+        else:
+            break
+    if prefix_len >= 15:
+        sys.stderr.write(
+            f"[X HALLUCINATION] Template IDs detected: "
+            f"all {len(id_strs)} IDs share {prefix_len}-digit prefix\n"
+        )
+        return True
+
+    # Signal 3: All engagement numbers divisible by 10 (4+ items)
+    if len(items) >= 4:
+        all_round = True
+        for item in items:
+            if item.engagement is None:
+                continue
+            eng = item.engagement
+            for val in [eng.likes, eng.reposts, eng.replies, eng.quotes]:
+                if val is not None and val > 0 and val % 10 != 0:
+                    all_round = False
+                    break
+            if not all_round:
+                break
+        if all_round:
+            sys.stderr.write(
+                "[X HALLUCINATION] All engagement numbers are round "
+                "(divisible by 10)\n"
+            )
+            return True
+
+    return False
 
 
 def normalize_reddit_items(

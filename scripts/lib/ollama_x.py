@@ -1,4 +1,4 @@
-"""xAI API client for X (Twitter) discovery."""
+"""Ollama client for X (Twitter) discovery (produces results, Claude supervises)."""
 
 import json
 import re
@@ -10,11 +10,15 @@ from . import http
 
 def _log_error(msg: str):
     """Log error to stderr."""
-    sys.stderr.write(f"[X ERROR] {msg}\n")
+    sys.stderr.write(f"[OLLAMA/X ERROR] {msg}\n")
     sys.stderr.flush()
 
-# xAI uses responses endpoint with Agent Tools API
-XAI_RESPONSES_URL = "https://api.x.ai/v1/responses"
+
+def _log_info(msg: str):
+    """Log info to stderr."""
+    sys.stderr.write(f"[OLLAMA/X] {msg}\n")
+    sys.stderr.flush()
+
 
 # Depth configurations: (min, max) posts to request
 DEPTH_CONFIG = {
@@ -23,7 +27,7 @@ DEPTH_CONFIG = {
     "deep": (40, 60),
 }
 
-X_SEARCH_PROMPT = """You have access to real-time X (Twitter) data. Search for posts about: {topic}
+X_SEARCH_PROMPT = """Find X (Twitter) posts about: {topic}
 
 Focus on posts from {from_date} to {to_date}. Find {min_items}-{max_items} high-quality, relevant posts.
 
@@ -55,77 +59,89 @@ Rules:
 - engagement can be null if unknown
 - Include diverse voices/accounts if applicable
 - Prefer posts with substantive content, not just links
-- If you cannot find real posts, return {"items": []} — do NOT make up results"""
+- If you cannot find real posts, return {{"items": []}} — do NOT make up results"""
 
 
 def search_x(
-    api_key: str,
+    base_url: str,
     model: str,
     topic: str,
     from_date: str,
     to_date: str,
     depth: str = "default",
-    mock_response: Optional[Dict] = None,
     max_items_cap: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Search X for relevant posts using xAI API with live search.
+    """Search X using Ollama.
 
     Args:
-        api_key: xAI API key
-        model: Model to use
+        base_url: Ollama base URL (e.g., "http://localhost:11434")
+        model: Ollama model name
         topic: Search topic
         from_date: Start date (YYYY-MM-DD)
         to_date: End date (YYYY-MM-DD)
         depth: Research depth - "quick", "default", or "deep"
-        mock_response: Mock response for testing
 
     Returns:
-        Raw API response
+        Raw response dict with "output" key containing the model's response
     """
-    if mock_response is not None:
-        return mock_response
-
     min_items, max_items = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
     if max_items_cap is not None:
         min_items = min(min_items, max_items_cap)
         max_items = max_items_cap
 
+    prompt = X_SEARCH_PROMPT.format(
+        topic=topic,
+        from_date=from_date,
+        to_date=to_date,
+        min_items=min_items,
+        max_items=max_items,
+    )
+
+    # Adjust timeout based on depth
+    timeout = 90 if depth == "quick" else 120 if depth == "default" else 180
+
+    url = f"{base_url.rstrip('/')}/api/chat"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.3,  # Lower temperature for more consistent JSON
+        }
+    }
+
     headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    # Adjust timeout based on depth (generous for API response time)
-    timeout = 90 if depth == "quick" else 120 if depth == "default" else 180
+    try:
+        response = http.post(url, payload, headers=headers, timeout=timeout)
 
-    # Use Agent Tools API with x_search tool
-    payload = {
-        "model": model,
-        "tools": [
-            {"type": "x_search"}
-        ],
-        "input": [
-            {
-                "role": "user",
-                "content": X_SEARCH_PROMPT.format(
-                    topic=topic,
-                    from_date=from_date,
-                    to_date=to_date,
-                    min_items=min_items,
-                    max_items=max_items,
-                ),
-            }
-        ],
-    }
+        # Ollama response format: {"message": {"content": "..."}}
+        if isinstance(response, dict):
+            message = response.get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content", "")
+                # Return in xAI-compatible format
+                return {"output": content}
 
-    return http.post(XAI_RESPONSES_URL, payload, headers=headers, timeout=timeout)
+        return {"output": str(response)}
+    except http.HTTPError as e:
+        _log_error(f"Ollama API error: {e}")
+        return {"error": str(e)}
 
 
 def parse_x_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Parse xAI response to extract X items.
+    """Parse Ollama response to extract X items.
 
     Args:
-        response: Raw API response
+        response: Raw API response (same format as xAI for compatibility)
 
     Returns:
         List of item dicts
@@ -136,41 +152,15 @@ def parse_x_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
     if "error" in response and response["error"]:
         error = response["error"]
         err_msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-        _log_error(f"xAI API error: {err_msg}")
+        _log_error(f"Ollama API error: {err_msg}")
         if http.DEBUG:
             _log_error(f"Full error response: {json.dumps(response, indent=2)[:1000]}")
         return items
 
-    # Try to find the output text
-    output_text = ""
-    if "output" in response:
-        output = response["output"]
-        if isinstance(output, str):
-            output_text = output
-        elif isinstance(output, list):
-            for item in output:
-                if isinstance(item, dict):
-                    if item.get("type") == "message":
-                        content = item.get("content", [])
-                        for c in content:
-                            if isinstance(c, dict) and c.get("type") == "output_text":
-                                output_text = c.get("text", "")
-                                break
-                    elif "text" in item:
-                        output_text = item["text"]
-                elif isinstance(item, str):
-                    output_text = item
-                if output_text:
-                    break
-
-    # Also check for choices (older format)
-    if not output_text and "choices" in response:
-        for choice in response["choices"]:
-            if "message" in choice:
-                output_text = choice["message"].get("content", "")
-                break
-
+    # Get output text
+    output_text = response.get("output", "")
     if not output_text:
+        _log_info("No output text found in Ollama response")
         return items
 
     # Extract JSON from the response
@@ -179,8 +169,9 @@ def parse_x_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
         try:
             data = json.loads(json_match.group())
             items = data.get("items", [])
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            _log_error(f"Failed to parse JSON: {e}")
+            return []
 
     # Validate and clean items
     clean_items = []
@@ -226,3 +217,47 @@ def parse_x_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
         clean_items.append(clean_item)
 
     return clean_items
+
+
+def check_ollama_connection(base_url: str, timeout: int = 5) -> bool:
+    """Check if Ollama is running and accessible.
+
+    Args:
+        base_url: Ollama base URL
+        timeout: Request timeout in seconds
+
+    Returns:
+        True if Ollama is accessible, False otherwise
+    """
+    try:
+        url = f"{base_url.rstrip('/')}/api/tags"
+        headers = {"Accept": "application/json"}
+        http.get(url, headers=headers, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def list_ollama_models(base_url: str, timeout: int = 5) -> List[str]:
+    """List available models from Ollama.
+
+    Args:
+        base_url: Ollama base URL
+        timeout: Request timeout in seconds
+
+    Returns:
+        List of model names
+    """
+    try:
+        url = f"{base_url.rstrip('/')}/api/tags"
+        headers = {"Accept": "application/json"}
+        response = http.get(url, headers=headers, timeout=timeout)
+
+        if isinstance(response, dict):
+            models = response.get("models", [])
+            return [m.get("name", "") for m in models if m.get("name")]
+
+        return []
+    except Exception as e:
+        _log_error(f"Failed to list Ollama models: {e}")
+        return []

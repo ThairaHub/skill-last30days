@@ -234,6 +234,7 @@ def search_x(
     from_date: str,
     to_date: str,
     depth: str = "default",
+    max_items_cap: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Search X using Bird CLI with automatic retry on 0 results.
 
@@ -247,6 +248,8 @@ def search_x(
         Raw Bird JSON response or error dict.
     """
     count = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
+    if max_items_cap is not None:
+        count = min(count, max_items_cap)
     timeout = 30 if depth == "quick" else 45 if depth == "default" else 60
 
     # Extract core subject - X search is literal, not semantic

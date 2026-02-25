@@ -125,6 +125,7 @@ def search_reddit(
     depth: str = "default",
     mock_response: Optional[Dict] = None,
     _retry: bool = False,
+    max_items_cap: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Search Reddit for relevant threads using OpenAI Responses API.
 
@@ -144,6 +145,9 @@ def search_reddit(
         return mock_response
 
     min_items, max_items = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
+    if max_items_cap is not None:
+        min_items = min(min_items, max_items_cap)
+        max_items = max_items_cap
 
     headers = {
         "Authorization": f"Bearer {api_key}",

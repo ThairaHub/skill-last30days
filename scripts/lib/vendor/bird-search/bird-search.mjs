@@ -21,7 +21,8 @@ const args = process.argv.slice(2);
 // --check: verify that credentials can be resolved
 if (args.includes('--check')) {
   try {
-    const { cookies, warnings } = await resolveCredentials({});
+    const cookieSource = process.env.BIRD_COOKIE_SOURCE || undefined;
+    const { cookies, warnings } = await resolveCredentials({ cookieSource });
     if (cookies.authToken && cookies.ct0) {
       process.stdout.write(JSON.stringify({ authenticated: true, source: cookies.source }));
       process.exit(0);
@@ -38,7 +39,8 @@ if (args.includes('--check')) {
 // --whoami: check auth and output source
 if (args.includes('--whoami')) {
   try {
-    const { cookies } = await resolveCredentials({});
+    const cookieSource = process.env.BIRD_COOKIE_SOURCE || undefined;
+    const { cookies } = await resolveCredentials({ cookieSource });
     if (cookies.authToken && cookies.ct0) {
       process.stdout.write(cookies.source || 'authenticated');
       process.exit(0);
@@ -78,7 +80,9 @@ if (!query) {
 
 try {
   // Resolve credentials (env vars, then browser cookies)
-  const { cookies, warnings } = await resolveCredentials({});
+  // Support BIRD_COOKIE_SOURCE env var to force Safari (avoids Chrome keychain prompts on Mac)
+  const cookieSource = process.env.BIRD_COOKIE_SOURCE || undefined;
+  const { cookies, warnings } = await resolveCredentials({ cookieSource });
 
   if (!cookies.authToken || !cookies.ct0) {
     const msg = warnings.length > 0 ? warnings.join('; ') : 'No Twitter credentials found';
